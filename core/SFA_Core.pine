@@ -1,0 +1,104 @@
+//@version=6
+// © 2025 SFA by FUGOZ
+// Structural Flow Analytics
+// All Rights Reserved
+// Logic-only core library
+// For analytical and educational use only
+library("SFA_Core")
+
+//----------------------------------------------------
+// f_core (LEGACY) - NO CAMBIAR NADA
+//----------------------------------------------------
+export f_core(int atrLen,bool useSessionFilter,string session1,string session2,bool useSesionRTH,string sesionRTH,bool useDispFilter,int dispLen,float dispRangeMult,float dispBodyMult,bool useImbFilter,int imbLen,float imbZMin,int lenTrend,int swLen,bool useStructAtrFilter,float structAtrFactor,int minBarsStruct)=>
+    float atr=ta.atr(atrLen)
+    bool inSess1=not na(time(timeframe.period,session1))
+    bool inSess2=not na(time(timeframe.period,session2))
+    bool inMainSession=inSess1 or inSess2
+    int tRTH=time(timeframe.period,sesionRTH)
+    bool inRTH=not na(tRTH)
+    bool inicioRTH=inRTH and(na(tRTH[1]) or tRTH<tRTH[1])
+    bool cambioDia=ta.change(time("D"))!=0
+    bool condReset=useSesionRTH?inicioRTH:cambioDia
+    float hlRange=high-low
+    float body=math.abs(close-open)
+    float avgRange=ta.sma(hlRange,dispLen)
+    float avgBody=ta.sma(body,dispLen)
+    bool dispCandle=avgRange>0 and avgBody>0 and hlRange>=avgRange*dispRangeMult and body>=avgBody*dispBodyMult
+    bool okDisplacement=not useDispFilter or dispCandle
+    float signedVol=close>open?volume:close<open?-volume:0.0
+    float weight=hlRange>0?body/hlRange:0.0
+    float flowProxy=signedVol*weight
+    float pressSeries=volume>0?flowProxy/volume:0.0
+    float pressMean=ta.sma(pressSeries,imbLen)
+    float pressStd=ta.stdev(pressSeries,imbLen)
+    float pressZ=pressStd>0?math.abs(pressSeries-pressMean)/pressStd:0.0
+    bool pressExtremeRaw=pressZ>=imbZMin
+    bool pressExtreme=useImbFilter?pressExtremeRaw:false
+    bool okPressure=not useImbFilter or pressExtremeRaw
+    bool okImpulse=okDisplacement and okPressure
+    var float scv=na
+    var int lastSign=0
+    bool hasPrevClose=not na(close[1])
+    int signNow=not hasPrevClose?0:close>close[1]?1:close<close[1]?-1:lastSign
+    lastSign:=signNow
+    float deltaBarRaw=hasPrevClose?signNow*volume:0.0
+    float deltaBar=useSesionRTH?(inRTH?deltaBarRaw:0.0):deltaBarRaw
+    scv:=condReset or na(scv[1])?deltaBar:scv[1]+deltaBar
+    float prNow=ta.linreg(close,lenTrend,0)
+    float prPrev=ta.linreg(close,lenTrend,1)
+    float slopePrice=prNow-prPrev
+    float scvNow=ta.linreg(scv,lenTrend,0)
+    float scvPrev=ta.linreg(scv,lenTrend,1)
+    float slopeScv=scvNow-scvPrev
+    bool upPrice=slopePrice>0
+    bool downPrice=slopePrice<0
+    bool upScv=slopeScv>0
+    bool downScv=slopeScv<0
+    bool bullTrend=upPrice and upScv
+    bool bearTrend=downPrice and downScv
+    bool distrib=upPrice and not upScv
+    bool acumul=downPrice and not downScv
+    float phPrice=ta.pivothigh(high,swLen,swLen)
+    float plPrice=ta.pivotlow(low,swLen,swLen)
+    bool isSwingHigh=not na(phPrice)
+    bool isSwingLow=not na(plPrice)
+    int phBar=isSwingHigh?bar_index-swLen:na
+    int plBar=isSwingLow?bar_index-swLen:na
+    var float lastHigh=na
+    var int lastHighBar=na
+    var float lastLow=na
+    var int lastLowBar=na
+    if isSwingHigh
+        float atrPivotH=atr[swLen]
+        int barsGapH=na(lastHighBar)?10000:phBar-lastHighBar
+        bool passH=not useStructAtrFilter or na(lastHigh) or(atrPivotH>0 and math.abs(phPrice-lastHigh)/atrPivotH>=structAtrFactor and barsGapH>=minBarsStruct)
+        if passH
+            lastHigh:=phPrice
+            lastHighBar:=phBar
+    if isSwingLow
+        float atrPivotL=atr[swLen]
+        int barsGapL=na(lastLowBar)?10000:plBar-lastLowBar
+        bool passL=not useStructAtrFilter or na(lastLow) or(atrPivotL>0 and math.abs(plPrice-lastLow)/atrPivotL>=structAtrFactor and barsGapL>=minBarsStruct)
+        if passL
+            lastLow:=plPrice
+            lastLowBar:=plBar
+    [atr,(useSessionFilter?inMainSession:true),inRTH,inicioRTH,dispCandle,okDisplacement,pressExtreme,pressZ,pressExtremeRaw,okPressure,okImpulse,scv,upPrice,downPrice,upScv,downScv,bullTrend,bearTrend,distrib,acumul,phPrice,plPrice,isSwingHigh,isSwingLow,phBar,plBar,lastHigh,lastHighBar,lastLow,lastLowBar]
+
+//----------------------------------------------------
+// Wrappers (NUEVAS ENTRADAS) - NO TOCAN f_core
+// resetMode: "RTH" / "DAY"
+//----------------------------------------------------
+export f_core_resetMode(int atrLen,bool useSessionFilter,string session1,string session2,string resetMode,string sesionRTH,bool useDispFilter,int dispLen,float dispRangeMult,float dispBodyMult,bool useImbFilter,int imbLen,float imbZMin,int lenTrend,int swLen,bool useStructAtrFilter,float structAtrFactor,int minBarsStruct)=>
+    bool useSesionRTH=resetMode=="RTH"
+    f_core(atrLen,useSessionFilter,session1,session2,useSesionRTH,sesionRTH,useDispFilter,dispLen,dispRangeMult,dispBodyMult,useImbFilter,imbLen,imbZMin,lenTrend,swLen,useStructAtrFilter,structAtrFactor,minBarsStruct)
+
+//----------------------------------------------------
+// Extra: getters (opcionales) - también sin tocar f_core
+//----------------------------------------------------
+export f_lastHigh(int atrLen,bool useSessionFilter,string session1,string session2,bool useSesionRTH,string sesionRTH,bool useDispFilter,int dispLen,float dispRangeMult,float dispBodyMult,bool useImbFilter,int imbLen,float imbZMin,int lenTrend,int swLen,bool useStructAtrFilter,float structAtrFactor,int minBarsStruct)=>
+    [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,lastHigh,_,_,_]=f_core(atrLen,useSessionFilter,session1,session2,useSesionRTH,sesionRTH,useDispFilter,dispLen,dispRangeMult,dispBodyMult,useImbFilter,imbLen,imbZMin,lenTrend,swLen,useStructAtrFilter,structAtrFactor,minBarsStruct)
+    lastHigh
+
+export f_lastLow(int atrLen,bool useSessionFilter,string session1,string session2,bool useSesionRTH,string sesionRTH,bool useDispFilter,int dispLen,float dispRangeMult,float dispBodyMult,bool useImbFilter,int imbLen,float imbZMin,int lenTrend,int swLen,bool useStructAtrFilter,float structAtrFactor,int minBarsStruct)=>
+    [_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,lastLow,_]=f_core(atrLen,useSessionFilter,session1,session2,useSesionRTH,sesionRTH,useDispFilter,dispLen,dispRangeMult,dispBodyMult,useImbFilter,imbLen,imbZMin,lenTrend,swLen,useStructAtrFilter,structAtrFactor,minBarsStruct)
+    lastLow
