@@ -1,0 +1,221 @@
+//@version=6
+library("SFA_FlowLiquidity_v1")
+
+// OUTPUTS (8) in exact order:
+// 1 sweepUp        bool
+// 2 sweepDown      bool
+// 3 sweepTypeUp    int
+// 4 sweepTypeDown  int
+// 5 sweepScoreUp   int
+// 6 sweepScoreDown int
+// 7 inMainSession  bool
+// 8 warmupOK       bool
+
+import FUGOZ/SFA_Core_v2/1 as CORE
+
+export f_flowLiquidity_v1()=>
+    // -------------------------------------------------
+    // CONSTANTS (INTERNAL)
+    // -------------------------------------------------
+    int atrLen=14
+    int eqLookback=60
+    int eqMaxBarsDist=60
+    int minBarsEqEff=20
+    int maxLiqLevelsEff=10
+    float liqTouchTolAtr=0.25
+    int liqAgeBars1=100
+    int liqAgeBars2=300
+    int liqMinScoreEff=2
+    bool useSweepScore=true
+    int sweepScoreMinEff=2
+    float minWickFrac=0.35
+    bool useDispFilter=true
+    int dispLen=20
+    float dispRangeMult=1.5
+    float dispBodyMult=1.5
+    bool useImbFilter=true
+    int imbLen=50
+    float imbZMin=1.5
+    bool useSessionFilter=true
+    string session1="0200-0500"
+    string session2="0830-1030"
+    bool useSesionRTH=true
+    string sesionRTH="0930-1600"
+    int lenTrend=20
+    int warmupBars=0
+    int swLen=7
+
+    // -------------------------------------------------
+    // CORE (SINGLE LINE) — MUST MATCH CORE OUTPUT COUNT EXACTLY
+    // -------------------------------------------------
+    string resetMode=useSesionRTH?"RTH":"DAY"
+    [atr,_,_,inMainSession_core,sessOK,_,_,_,_,_,warmupOK,dispCandle,_,_,_,pressExtreme,_,_,_,scv,upPrice,downPrice,upScv,downScv,bullTrend,bearTrend,distrib,acumul,phPrice,plPrice,isSwingHigh,isSwingLow,phBar,plBar]=CORE.f_core_v2(atrLen,useSessionFilter,session1,session2,resetMode,sesionRTH,useDispFilter,dispLen,dispRangeMult,dispBodyMult,useImbFilter,imbLen,imbZMin,lenTrend,swLen,warmupBars)
+
+    bool inMainSession=inMainSession_core
+
+    // -------------------------------------------------
+    // LOCAL PERSISTENT STATE (LEGAL IN EXPORT)
+    // -------------------------------------------------
+    var float[] liqPrices=array.new_float()
+    var int[] liqDir=array.new_int()
+    var bool[] liqUsed=array.new_bool()
+    var int[] liqBaseScore=array.new_int()
+    var int[] liqCreatedBar=array.new_int()
+    var int[] liqTouches=array.new_int()
+    var float[] liqRefScv=array.new_float()
+    var bool[] liqWasTouching=array.new_bool()
+
+    // -------------------------------------------------
+    // SWING STORAGE
+    // -------------------------------------------------
+    var float[] swingHighPrices=array.new_float()
+    var int[] swingHighBars=array.new_int()
+    var float[] swingLowPrices=array.new_float()
+    var int[] swingLowBarsI=array.new_int()
+
+    if isSwingHigh
+        array.push(swingHighPrices,phPrice)
+        array.push(swingHighBars,phBar)
+        if array.size(swingHighPrices)>eqLookback
+            array.shift(swingHighPrices)
+            array.shift(swingHighBars)
+
+    if isSwingLow
+        array.push(swingLowPrices,plPrice)
+        array.push(swingLowBarsI,plBar)
+        if array.size(swingLowPrices)>eqLookback
+            array.shift(swingLowPrices)
+            array.shift(swingLowBarsI)
+
+    // -------------------------------------------------
+    // SAFETY GUARDS (DETERMINISM / NO-NA)
+    // -------------------------------------------------
+    int swLen1=math.max(1,swLen)
+    bool histOK=bar_index>swLen1
+
+    float atrNow=atr[0]
+    bool atrOK=not na(atrNow)
+
+    float atrHist=atr[swLen1]
+
+    // Numeric series: safe na() checks
+    bool scvHistOK=not na(scv[swLen1])
+
+    // Bool series: do NOT call na() on them. Force deterministic false on na via "== true".
+    bool distribHist=distrib[swLen1]==true
+    bool acumulHist=acumul[swLen1]==true
+    bool bullTrendHist=bullTrend[swLen1]==true
+    bool bearTrendHist=bearTrend[swLen1]==true
+
+    bool histValOK=not na(atrHist) and scvHistOK
+
+    // -------------------------------------------------
+    // REGISTER EQ LIQUIDITY
+    // -------------------------------------------------
+    if warmupOK and histOK and atrOK and histValOK and isSwingHigh
+        int i=array.size(swingHighPrices)-2
+        while i>=0
+            bool barsOk=math.abs(phBar-array.get(swingHighBars,i))>=minBarsEqEff and math.abs(phBar-array.get(swingHighBars,i))<=eqMaxBarsDist
+            bool priceOk=math.abs(phPrice-array.get(swingHighPrices,i))<=atrHist*0.15
+            bool ctxOk=distribHist or bearTrendHist
+            if barsOk and priceOk and ctxOk
+                array.push(liqPrices,(array.get(swingHighPrices,i)+phPrice)*0.5)
+                array.push(liqDir,1)
+                array.push(liqUsed,false)
+                array.push(liqBaseScore,2)
+                array.push(liqCreatedBar,bar_index)
+                array.push(liqTouches,0)
+                array.push(liqRefScv,scv[swLen1])
+                array.push(liqWasTouching,false)
+                if array.size(liqPrices)>maxLiqLevelsEff
+                    array.shift(liqPrices)
+                    array.shift(liqDir)
+                    array.shift(liqUsed)
+                    array.shift(liqBaseScore)
+                    array.shift(liqCreatedBar)
+                    array.shift(liqTouches)
+                    array.shift(liqRefScv)
+                    array.shift(liqWasTouching)
+                break
+            i-=1
+
+    if warmupOK and histOK and atrOK and histValOK and isSwingLow
+        int j=array.size(swingLowPrices)-2
+        while j>=0
+            bool barsOk2=math.abs(plBar-array.get(swingLowBarsI,j))>=minBarsEqEff and math.abs(plBar-array.get(swingLowBarsI,j))<=eqMaxBarsDist
+            bool priceOk2=math.abs(plPrice-array.get(swingLowPrices,j))<=atrHist*0.15
+            bool ctxOk2=acumulHist or bullTrendHist
+            if barsOk2 and priceOk2 and ctxOk2
+                array.push(liqPrices,(array.get(swingLowPrices,j)+plPrice)*0.5)
+                array.push(liqDir,-1)
+                array.push(liqUsed,false)
+                array.push(liqBaseScore,2)
+                array.push(liqCreatedBar,bar_index)
+                array.push(liqTouches,0)
+                array.push(liqRefScv,scv[swLen1])
+                array.push(liqWasTouching,false)
+                if array.size(liqPrices)>maxLiqLevelsEff
+                    array.shift(liqPrices)
+                    array.shift(liqDir)
+                    array.shift(liqUsed)
+                    array.shift(liqBaseScore)
+                    array.shift(liqCreatedBar)
+                    array.shift(liqTouches)
+                    array.shift(liqRefScv)
+                    array.shift(liqWasTouching)
+                break
+            j-=1
+
+    // -------------------------------------------------
+    // EVENT DETECTION
+    // -------------------------------------------------
+    bool sweepUp=false
+    bool sweepDown=false
+    int sweepTypeUp=0
+    int sweepTypeDown=0
+    int sweepScoreUp=0
+    int sweepScoreDown=0
+
+    float wickUp=high-math.max(open,close)
+    float wickDown=math.min(open,close)-low
+    float candleRange=high-low
+    bool gate=not useSessionFilter or sessOK
+    float scvNow=scv
+    bool scvOK=not na(scvNow)
+
+    if warmupOK and histOK and atrOK and scvOK and gate and candleRange>0 and array.size(liqPrices)>0
+        float tol=atrNow*liqTouchTolAtr
+        for m=0 to array.size(liqPrices)-1
+            if not array.get(liqUsed,m)
+                int age=bar_index-array.get(liqCreatedBar,m)
+                int touches=array.get(liqTouches,m)
+                int scoreL=array.get(liqBaseScore,m)+(age>=liqAgeBars2?2:age>=liqAgeBars1?1:0)+(touches>=3?2:touches==2?1:0)
+
+                float lvl=array.get(liqPrices,m)
+                int dir=array.get(liqDir,m)
+                float ref=array.get(liqRefScv,m)
+
+                bool rejUp=dir==1 and high>=lvl+tol and close<=lvl-tol and wickUp/candleRange>=minWickFrac
+                bool accUp=dir==1 and high>=lvl+tol and close>=lvl+tol
+                bool rejDn=dir==-1 and low<=lvl-tol and close>=lvl+tol and wickDown/candleRange>=minWickFrac
+                bool accDn=dir==-1 and low<=lvl-tol and close<=lvl-tol
+
+                bool divUp=dir==1 and ((scvNow<ref) or (upPrice and downScv))
+                bool divDn=dir==-1 and ((scvNow>ref) or (downPrice and upScv))
+
+                bool evtUp=(rejUp or accUp) and divUp
+                bool evtDn=(rejDn or accDn) and divDn
+
+                if evtUp or evtDn
+                    int score=(inMainSession?1:0)+(useDispFilter and dispCandle?1:0)+(useImbFilter and pressExtreme?1:0)+(scoreL>=liqMinScoreEff?1:0)
+                    if not useSweepScore or score>=sweepScoreMinEff
+                        if evtUp and score>sweepScoreUp
+                            sweepUp:=true
+                            sweepScoreUp:=score
+                            sweepTypeUp:=rejUp?1:2
+                        if evtDn and score>sweepScoreDown
+                            sweepDown:=true
+                            sweepScoreDown:=score
+                            sweepTypeDown:=rejDn?1:2
+
+    [sweepUp,sweepDown,sweepTypeUp,sweepTypeDown,sweepScoreUp,sweepScoreDown,inMainSession,warmupOK]
