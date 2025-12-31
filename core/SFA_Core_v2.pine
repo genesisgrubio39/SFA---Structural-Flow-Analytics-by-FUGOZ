@@ -1,0 +1,144 @@
+//@version=6
+// © 2025 SFA by FUGOZ
+// Structural Flow Analytics
+// All Rights Reserved
+// For educational and analytical use only
+library("SFA_Core_v2")
+
+//======================================================================
+// f_core_v2 (NEW) - CONTRACTED OUTPUTS (DO NOT REORDER)
+//----------------------------------------------------------------------
+export f_core_v2(int atrLen,bool useSessionFilter,string session1,string session2,string resetMode,string sessionRTH,bool useDispFilter,int dispLen,float dispRangeMult,float dispBodyMult,bool useImbFilter,int imbLen,float imbZMin,int lenTrend,int swLen,int warmupBars)=>
+    int atrLen1=math.max(1,atrLen)
+    int dispLen1=math.max(1,dispLen)
+    int imbLen1=math.max(1,imbLen)
+    int lenTrend1=math.max(2,lenTrend)
+    int swLen1=math.max(1,swLen)
+    int warmup1=math.max(0,warmupBars)
+
+    float atr=ta.atr(atrLen1)
+    bool inSess1=not na(time(timeframe.period,session1))
+    bool inSess2=not na(time(timeframe.period,session2))
+    bool inMainSession=inSess1 or inSess2
+    bool sessOK=useSessionFilter?inMainSession:true
+
+    // time() can be na; keep it as series int explicitly
+    int tRTH = time(timeframe.period, sessionRTH)
+    bool inRTH=not na(tRTH)
+    bool inicioRTH=inRTH and (na(tRTH[1]) or tRTH<tRTH[1])
+    bool cambioDia=ta.change(time("D"))!=0
+
+    bool useSesionRTH=resetMode=="RTH"
+    bool condReset=useSesionRTH?inicioRTH:cambioDia
+
+    var int _st_resetBar=na
+    if condReset or na(_st_resetBar)
+        _st_resetBar:=bar_index
+    int barsSinceReset=bar_index-_st_resetBar
+    bool warmupOK=barsSinceReset>=warmup1
+
+    float hlRange=high-low
+    float body=math.abs(close-open)
+    float avgRange=ta.sma(hlRange,dispLen1)
+    float avgBody=ta.sma(body,dispLen1)
+    bool dispCandle=avgRange>0 and avgBody>0 and hlRange>=avgRange*dispRangeMult and body>=avgBody*dispBodyMult
+    bool okDisplacement=not useDispFilter or dispCandle
+
+    float signedVol=close>open?volume:close<open?-volume:0.0
+    float weight=hlRange>0?body/hlRange:0.0
+    float flowProxy=signedVol*weight
+    float pressSeries=volume>0?flowProxy/volume:0.0
+    float pressMean=ta.sma(pressSeries,imbLen1)
+    float pressStd=ta.stdev(pressSeries,imbLen1)
+    float pressZ=pressStd>0?math.abs(pressSeries-pressMean)/pressStd:0.0
+    bool pressExtremeRaw=pressZ>=imbZMin
+
+    // Make output informative regardless of filter toggle
+    bool pressExtreme = pressExtremeRaw
+    bool okPressure=not useImbFilter or pressExtremeRaw
+
+    // Recommended: if consumers treat okImpulse as tradable signal, respect session+warmup
+    bool okImpulse = okDisplacement and okPressure and sessOK and warmupOK
+
+    var float scv=na
+    var int lastSign=0
+    if condReset
+        lastSign:=0
+
+    bool hasPrevClose=not na(close[1])
+    int signNow=not hasPrevClose?0:close>close[1]?1:close<close[1]?-1:lastSign
+    lastSign:=signNow
+
+    float deltaBarRaw=hasPrevClose?signNow*volume:0.0
+    float deltaBar=useSesionRTH?(inRTH?deltaBarRaw:0.0):deltaBarRaw
+    scv:=condReset or na(scv[1])?deltaBar:scv[1]+deltaBar
+
+    float prNow=ta.linreg(close,lenTrend1,0)
+    float prPrev=ta.linreg(close,lenTrend1,1)
+    float slopePrice=prNow-prPrev
+
+    float scvNow=ta.linreg(scv,lenTrend1,0)
+    float scvPrev=ta.linreg(scv,lenTrend1,1)
+    float slopeScv=scvNow-scvPrev
+
+    bool upPrice=slopePrice>0
+    bool downPrice=slopePrice<0
+    bool upScv=slopeScv>0
+    bool downScv=slopeScv<0
+
+    bool bullTrend=upPrice and upScv
+    bool bearTrend=downPrice and downScv
+    bool distrib=upPrice and not upScv
+    bool acumul=downPrice and not upScv
+
+    float phPrice=ta.pivothigh(high,swLen1,swLen1)
+    float plPrice=ta.pivotlow(low,swLen1,swLen1)
+    bool isSwingHigh=not na(phPrice)
+    bool isSwingLow=not na(plPrice)
+    int phBar=isSwingHigh?bar_index-swLen1:na
+    int plBar=isSwingLow?bar_index-swLen1:na
+
+    [atr,inSess1,inSess2,inMainSession,sessOK,inRTH,inicioRTH,cambioDia,condReset,barsSinceReset,warmupOK,dispCandle,okDisplacement,pressZ,pressExtremeRaw,pressExtreme,okPressure,okImpulse,deltaBar,scv,upPrice,downPrice,upScv,downScv,bullTrend,bearTrend,distrib,acumul,phPrice,plPrice,isSwingHigh,isSwingLow,phBar,plBar]
+
+//--------------------------------------------------------------------
+// f_structTrack_v2 (OPTIONAL) - stateful structural tracking
+//--------------------------------------------------------------------
+export f_structTrack_v2(float atr,int swLen,bool useStructAtrFilter,float structAtrFactor,int minBarsStruct,float phPrice,float plPrice,bool isSwingHigh,bool isSwingLow,int phBar,int plBar)=>
+    int swLen1=math.max(1,swLen)
+    int minBars1=math.max(0,minBarsStruct)
+
+    var float lastHigh=na
+    var int lastHighBar=na
+    var float lastLow=na
+    var int lastLowBar=na
+
+    if isSwingHigh
+        float atrPivotH=atr[swLen1]
+        int barsGapH=na(lastHighBar)?10000:phBar-lastHighBar
+        bool passH=not useStructAtrFilter or na(lastHigh) or (atrPivotH>0 and math.abs(phPrice-lastHigh)/atrPivotH>=structAtrFactor and barsGapH>=minBars1)
+        if passH
+            lastHigh:=phPrice
+            lastHighBar:=phBar
+
+    if isSwingLow
+        float atrPivotL=atr[swLen1]
+        int barsGapL=na(lastLowBar)?10000:plBar-lastLowBar
+        bool passL=not useStructAtrFilter or na(lastLow) or (atrPivotL>0 and math.abs(plPrice-lastLow)/atrPivotL>=structAtrFactor and barsGapL>=minBars1)
+        if passL
+            lastLow:=plPrice
+            lastLowBar:=plBar
+
+    [lastHigh,lastHighBar,lastLow,lastLowBar]
+
+//--------------------------------------------------------------------
+// Convenience getters for lastHigh/lastLow using v2 pipeline
+//--------------------------------------------------------------------
+export f_lastHigh_v2(int atrLen,bool useSessionFilter,string session1,string session2,string resetMode,string sessionRTH,bool useDispFilter,int dispLen,float dispRangeMult,float dispBodyMult,bool useImbFilter,int imbLen,float imbZMin,int lenTrend,int swLen,int warmupBars,bool useStructAtrFilter,float structAtrFactor,int minBarsStruct)=>
+    [atr,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,phPrice,plPrice,isSwingHigh,isSwingLow,phBar,plBar]=f_core_v2(atrLen,useSessionFilter,session1,session2,resetMode,sessionRTH,useDispFilter,dispLen,dispRangeMult,dispBodyMult,useImbFilter,imbLen,imbZMin,lenTrend,swLen,warmupBars)
+    [lastHigh,_,_,_]=f_structTrack_v2(atr,swLen,useStructAtrFilter,structAtrFactor,minBarsStruct,phPrice,plPrice,isSwingHigh,isSwingLow,phBar,plBar)
+    lastHigh
+
+export f_lastLow_v2(int atrLen,bool useSessionFilter,string session1,string session2,string resetMode,string sessionRTH,bool useDispFilter,int dispLen,float dispRangeMult,float dispBodyMult,bool useImbFilter,int imbLen,float imbZMin,int lenTrend,int swLen,int warmupBars,bool useStructAtrFilter,float structAtrFactor,int minBarsStruct)=>
+    [atr,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,phPrice,plPrice,isSwingHigh,isSwingLow,phBar,plBar]=f_core_v2(atrLen,useSessionFilter,session1,session2,resetMode,sessionRTH,useDispFilter,dispLen,dispRangeMult,dispBodyMult,useImbFilter,imbLen,imbZMin,lenTrend,swLen,warmupBars)
+    [_,_,lastLow,_]=f_structTrack_v2(atr,swLen,useStructAtrFilter,structAtrFactor,minBarsStruct,phPrice,plPrice,isSwingHigh,isSwingLow,phBar,plBar)
+    lastLow
