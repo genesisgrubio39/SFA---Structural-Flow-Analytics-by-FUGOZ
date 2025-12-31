@@ -1,0 +1,161 @@
+//@version=6
+library("SFA_PriceGapInefficiency_v1")
+
+// OUTPUTS (12) in exact order:
+// 1 newBullGap        bool
+// 2 newBearGap        bool
+// 3 bullTop           float
+// 4 bullBottom        float
+// 5 bearTop           float
+// 6 bearBottom        float
+// 7 bullMitigated     bool
+// 8 bearMitigated     bool
+// 9 bullInside        bool
+// 10 bearInside       bool
+// 11 flowBullOk       bool
+// 12 flowBearOk       bool
+
+import FUGOZ/SFA_Core_v2/1 as CORE
+
+export f_priceGapInefficiency_v1(
+    bool useAutoProfile,
+    string assetTypeManual,
+    bool useCvdFilter,
+    string cvdFilterMode,
+    string mitigType
+)=>
+    int atrLen=14
+    string rthSession="0930-1600"
+    string resetMode="RTH"
+
+    float minGapAtrFactor=0.8
+    bool usePctFilter=true
+    float minGapPct=0.4
+
+    // ------------------------------
+    // AUTO PROFILE (DETERMINISTIC)
+    // ------------------------------
+    string assetTypeEff=assetTypeManual
+    if useAutoProfile
+        string tkr=str.upper(syminfo.ticker)
+        bool isFut=syminfo.type=="futures"
+        bool isIdx=syminfo.type=="index"
+        bool isFx=syminfo.type=="forex"
+        bool isCrypto=syminfo.type=="crypto"
+        bool isIndexLike=isFut or isIdx
+        bool isIndexETF=(tkr=="SPY") or (tkr=="QQQ") or (tkr=="IWM") or (tkr=="DIA")
+
+        assetTypeEff:=isIndexLike ? "Index / Futures" : isIndexETF ? "MegaCap / ETF" : ((isFx or isCrypto) ? "FX / Crypto" : "Regular equity")
+
+    if assetTypeEff=="Index / Futures" or assetTypeEff=="MegaCap / ETF"
+        minGapAtrFactor:=0.7
+        minGapPct:=0.3
+    else if assetTypeEff=="Regular equity"
+        minGapAtrFactor:=0.8
+        minGapPct:=0.4
+    else if assetTypeEff=="SmallCap / Low liquidity"
+        minGapAtrFactor:=1.0
+        minGapPct:=0.6
+    else if assetTypeEff=="FX / Crypto"
+        minGapAtrFactor:=0.7
+        minGapPct:=0.25
+
+    // ------------------------------
+    // CORE (CONTRACTED OUTPUT MAP)
+    // ------------------------------
+    [coreAtr,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,coreScv,_,_,_,_,_,_,_,_,_,_,_,_,_,_]=CORE.f_core_v2(
+        atrLen,
+        false,
+        "0000-2359",
+        "0000-2359",
+        resetMode,
+        rthSession,
+        false,
+        20,
+        2.0,
+        2.0,
+        false,
+        50,
+        3.0,
+        20,
+        2,
+        0
+    )
+
+    float atrVal=coreAtr
+    float cvdSeries=coreScv
+
+    // ------------------------------
+    // FLOW FILTER (WARMUP SAFE)
+    //  - Deterministic behavior: prior to warmup, filter is neutral (true) when enabled
+    // ------------------------------
+    int lenFlowTrend=20
+    bool flowWarmupOK=bar_index>=lenFlowTrend+2 and not na(cvdSeries)
+
+    float prNow=flowWarmupOK ? ta.linreg(close,lenFlowTrend,0) : na
+    float prPrev=flowWarmupOK ? ta.linreg(close,lenFlowTrend,1) : na
+    float slopePrice=flowWarmupOK ? (prNow-prPrev) : 0.0
+
+    float cvdNow=flowWarmupOK ? ta.linreg(cvdSeries,lenFlowTrend,0) : na
+    float cvdPrev=flowWarmupOK ? ta.linreg(cvdSeries,lenFlowTrend,1) : na
+    float slopeCvd=flowWarmupOK ? (cvdNow-cvdPrev) : 0.0
+
+    bool flowAlignedBull=flowWarmupOK and slopePrice>0 and slopeCvd>0
+    bool flowAlignedBear=flowWarmupOK and slopePrice<0 and slopeCvd<0
+    bool divergBull=flowWarmupOK and slopePrice<0 and slopeCvd>0
+    bool divergBear=flowWarmupOK and slopePrice>0 and slopeCvd<0
+
+    bool flowBullOk=not useCvdFilter ? true : (not flowWarmupOK ? true : (cvdFilterMode=="Flow aligned" ? flowAlignedBull : divergBull))
+    bool flowBearOk=not useCvdFilter ? true : (not flowWarmupOK ? true : (cvdFilterMode=="Flow aligned" ? flowAlignedBear : divergBear))
+
+    // ------------------------------
+    // GAP CANDIDATES (CURRENT BAR)
+    // ------------------------------
+    float bullTop=na
+    float bullBottom=na
+    float bearTop=na
+    float bearBottom=na
+
+    if open>close[1]
+        bullTop:=open
+        bullBottom:=close[1]
+    if open<close[1]
+        bearTop:=close[1]
+        bearBottom:=open
+    if open>high[1]
+        bullTop:=na(bullTop) ? open : math.max(bullTop,open)
+        bullBottom:=na(bullBottom) ? high[1] : math.min(bullBottom,high[1])
+    if open<low[1]
+        bearTop:=na(bearTop) ? low[1] : math.max(bearTop,low[1])
+        bearBottom:=na(bearBottom) ? open : math.min(bearBottom,open)
+
+    bool newBullGap=false
+    bool newBearGap=false
+
+    if not na(bullTop) and not na(bullBottom) and bullTop>bullBottom
+        float sizeUp=bullTop-bullBottom
+        float pctUp=close[1]!=0.0 ? sizeUp/close[1]*100.0 : 0.0
+        if sizeUp>=minGapAtrFactor*atrVal and (not usePctFilter or pctUp>=minGapPct) and flowBullOk
+            newBullGap:=true
+
+    if not na(bearTop) and not na(bearBottom) and bearTop>bearBottom
+        float sizeDn=bearTop-bearBottom
+        float pctDn=close[1]!=0.0 ? sizeDn/close[1]*100.0 : 0.0
+        if sizeDn>=minGapAtrFactor*atrVal and (not usePctFilter or pctDn>=minGapPct) and flowBearOk
+            newBearGap:=true
+
+    bool bullInside=not na(bullTop) and high>bullBottom and low<bullTop
+    bool bearInside=not na(bearTop) and high>bearBottom and low<bearTop
+
+    bool bullMitigated=false
+    bool bearMitigated=false
+
+    if not na(bullTop) and not na(bullBottom)
+        float ceMid=(bullTop+bullBottom)*0.5
+        bullMitigated:=mitigType=="Engulf" ? low<=bullBottom : low<=ceMid
+
+    if not na(bearTop) and not na(bearBottom)
+        float ceMid2=(bearTop+bearBottom)*0.5
+        bearMitigated:=mitigType=="Engulf" ? high>=bearTop : high>=ceMid2
+
+    [newBullGap, newBearGap, bullTop, bullBottom, bearTop, bearBottom, bullMitigated, bearMitigated, bullInside, bearInside, flowBullOk, flowBearOk]
