@@ -1,0 +1,151 @@
+//@version=6
+library("SFA_StructuralBreaker_v1")
+
+// OUTPUTS (10) in exact order:
+// 1 brkUp            bool
+// 2 brkDown          bool
+// 3 brkTop           float
+// 4 brkBottom        float
+// 5 brkMid           float
+// 6 originTop        float
+// 7 originBottom     float
+// 8 originIsBull     bool
+// 9 originState      int
+// 10 warmupOK        bool
+
+import FUGOZ/SFA_Core_v2/1 as CORE
+
+export f_structuralBreaker_v1()=>
+    // -------------------------------------------------
+    // CONSTANTS (INTERNAL) + SANITIZATION
+    // -------------------------------------------------
+    int atrLen=14
+    int volLen=60
+    float volPercThresh=65.0
+    int swLenOb=3
+    int swLenBrk=3
+    float dispFactorOb=0.3
+    float dispFactorBrk=0.4
+    int warmupBarsCore=1
+    string resetModeCore="RTH"
+    string sessionRTHCore="0930-1600"
+
+    int atrLenEff=math.max(1,atrLen)
+    int volLenEff=math.max(1,volLen)
+    int swLenObEff=math.max(1,swLenOb)
+    int swLenBrkEff=math.max(1,swLenBrk)
+    float volPercEff=math.min(100.0,math.max(0.0,volPercThresh))
+    float dispObEff=math.max(0.0,dispFactorOb)
+    float dispBrkEff=math.max(0.0,dispFactorBrk)
+    int warmupNeed=math.max(warmupBarsCore,volLenEff)
+
+    // -------------------------------------------------
+    // CORE (OB)
+    // -------------------------------------------------
+    [atrOb,_,_,_,_,inRTHOb,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_]=CORE.f_core_v2(atrLenEff,false,"0000-0000","0000-0000",resetModeCore,sessionRTHCore,false,1,1.0,1.0,false,1,0.0,1,swLenObEff,warmupBarsCore)
+    float lastHighOb=CORE.f_lastHigh_v2(atrLenEff,false,"0000-0000","0000-0000",resetModeCore,sessionRTHCore,false,1,1.0,1.0,false,1,0.0,1,swLenObEff,warmupBarsCore,false,1.0,1)
+    float lastLowOb =CORE.f_lastLow_v2 (atrLenEff,false,"0000-0000","0000-0000",resetModeCore,sessionRTHCore,false,1,1.0,1.0,false,1,0.0,1,swLenObEff,warmupBarsCore,false,1.0,1)
+
+    // -------------------------------------------------
+    // CORE (BRK)
+    // -------------------------------------------------
+    [atrBrk,_,_,_,_,inRTHBrk,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_]=CORE.f_core_v2(atrLenEff,false,"0000-0000","0000-0000",resetModeCore,sessionRTHCore,false,1,1.0,1.0,false,1,0.0,1,swLenBrkEff,warmupBarsCore)
+    float lastHighBrk=CORE.f_lastHigh_v2(atrLenEff,false,"0000-0000","0000-0000",resetModeCore,sessionRTHCore,false,1,1.0,1.0,false,1,0.0,1,swLenBrkEff,warmupBarsCore,false,1.0,1)
+    float lastLowBrk =CORE.f_lastLow_v2 (atrLenEff,false,"0000-0000","0000-0000",resetModeCore,sessionRTHCore,false,1,1.0,1.0,false,1,0.0,1,swLenBrkEff,warmupBarsCore,false,1.0,1)
+
+    bool sessOKOb=timeframe.isintraday?inRTHOb:true
+    bool sessOKBrk=timeframe.isintraday?inRTHBrk:true
+
+    // -------------------------------------------------
+    // BOS (OB)
+    // -------------------------------------------------
+    bool bosUpOb=not na(lastHighOb) and close>lastHighOb and (close-lastHighOb)>=atrOb*dispObEff
+    bool bosDownOb=not na(lastLowOb) and close<lastLowOb and (lastLowOb-close)>=atrOb*dispObEff
+
+    // -------------------------------------------------
+    // Candle / Volume gating
+    // -------------------------------------------------
+    bool isBearCandle=close<open
+    bool isBullCandle=close>open
+
+    float volThresh=ta.percentile_linear_interpolation(volume,volLenEff,volPercEff)
+    bool volInst=not na(volThresh) and volume>=volThresh
+
+    bool bullObCandidate=isBearCandle and volInst
+    bool bearObCandidate=isBullCandle and volInst
+
+    // -------------------------------------------------
+    // Pending origin candidate
+    // -------------------------------------------------
+    var bool hasPending=false
+    var float pendTop=na
+    var float pendBottom=na
+    var bool pendIsBull=false
+
+    if sessOKOb and bullObCandidate
+        hasPending:=true
+        pendTop:=high
+        pendBottom:=low
+        pendIsBull:=true
+
+    if sessOKOb and bearObCandidate
+        hasPending:=true
+        pendTop:=high
+        pendBottom:=low
+        pendIsBull:=false
+
+    // -------------------------------------------------
+    // Origin state (PERSISTENT)
+    // originState: 0 none | 1 armed | 2 converted-to-breaker
+    // -------------------------------------------------
+    var float originTop=na
+    var float originBottom=na
+    var bool originIsBull=false
+    var int originState=0
+
+    if hasPending and bosUpOb and pendIsBull
+        originTop:=pendTop
+        originBottom:=pendBottom
+        originIsBull:=true
+        originState:=1
+        hasPending:=false
+
+    if hasPending and bosDownOb and not pendIsBull
+        originTop:=pendTop
+        originBottom:=pendBottom
+        originIsBull:=false
+        originState:=1
+        hasPending:=false
+
+    // -------------------------------------------------
+    // BOS (BRK)
+    // -------------------------------------------------
+    bool bosUpBrk=not na(lastHighBrk) and close>lastHighBrk and (close-lastHighBrk)>=atrBrk*dispBrkEff
+    bool bosDownBrk=not na(lastLowBrk) and close<lastLowBrk and (lastLowBrk-close)>=atrBrk*dispBrkEff
+
+    // -------------------------------------------------
+    // Breaker trigger
+    // -------------------------------------------------
+    bool brkUp=false
+    bool brkDown=false
+    float brkTop=na
+    float brkBottom=na
+    float brkMid=na
+
+    if originState==1 and sessOKBrk and not na(originTop) and not na(originBottom)
+        if originIsBull and bosDownBrk
+            brkDown:=true
+        if not originIsBull and bosUpBrk
+            brkUp:=true
+        if brkUp or brkDown
+            brkTop:=originTop
+            brkBottom:=originBottom
+            brkMid:=(originTop+originBottom)*0.5
+            originState:=2
+
+    // -------------------------------------------------
+    // Warmup (REALISTIC)
+    // -------------------------------------------------
+    bool warmupOK=bar_index>=warmupNeed
+
+    [brkUp,brkDown,brkTop,brkBottom,brkMid,originTop,originBottom,originIsBull,originState,warmupOK]
