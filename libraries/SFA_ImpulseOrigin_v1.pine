@@ -1,0 +1,132 @@
+//@version=6
+library("SFA_ImpulseOrigin_v1")
+
+// OUTPUTS (8) in exact order:
+// 1 bullCreated      bool
+// 2 bearCreated      bool
+// 3 bullTop          float
+// 4 bullBottom       float
+// 5 bearTop          float
+// 6 bearBottom       float
+// 7 bullIsReversal   bool
+// 8 bearIsReversal   bool
+
+import FUGOZ/SFA_Core_v2/1 as CORE
+
+export f_impulseOrigin_v1(string presetMode,int atrLen,float atrMinFactor,float rangeRelax,float atrMaxFactor,int volLen,float volPercThresh,int maxBarsObToBos,int swLen,float dispFactor,bool useSesionRTH,string sesionRTH)=>
+    int atrLenEff=math.max(1,atrLen)
+    int volLenEff=math.max(1,volLen)
+    int swLenEff=math.max(1,swLen)
+    int maxBarsObToBosEff=math.max(1,maxBarsObToBos)
+
+    float atrMinEff=math.max(0.0,atrMinFactor)
+    float rangeRelaxEff=math.max(0.0,rangeRelax)
+    float atrMaxEff=math.max(0.0,atrMaxFactor)
+    float volPercEff=math.max(0.0,math.min(100.0,volPercThresh))
+    float dispEff=math.max(0.0,dispFactor)
+
+    bool useDeltaFilter=presetMode=="Index futures" or presetMode=="Index ETF"
+
+    string resetMode=useSesionRTH?"RTH":"DAY"
+    int warmupBars=1
+
+    [atrCore,_,_,_,_,_,_,_,condResetCore,_,_,_,_,_,pressExtremeRaw,_,_,_,_,scvCore,_,_,_,_,_,_,_,_,_,_,_,_,_,_]=CORE.f_core_v2(atrLenEff,false,"0000-0000","0000-0000",resetMode,sesionRTH,false,1,1.0,1.0,false,1,0.0,1,swLenEff,warmupBars)
+
+    float lastHigh=CORE.f_lastHigh_v2(atrLenEff,false,"0000-0000","0000-0000",resetMode,sesionRTH,false,1,1.0,1.0,false,1,0.0,1,swLenEff,warmupBars,false,1.0,1)
+    float lastLow=CORE.f_lastLow_v2(atrLenEff,false,"0000-0000","0000-0000",resetMode,sesionRTH,false,1,1.0,1.0,false,1,0.0,1,swLenEff,warmupBars,false,1.0,1)
+
+    float atrValue=atrCore
+    float rangeSize=high-low
+
+    float volThresh=ta.percentile_linear_interpolation(volume,volLenEff,volPercEff)
+    bool volInst=volume>=volThresh
+
+    var float cvd=na
+    cvd:=scvCore
+    bool condReset=condResetCore
+    float deltaBar=(condReset or na(cvd[1]))?cvd:cvd-cvd[1]
+
+    bool hasPrev=not na(close[1])
+    float deltaProxy=not hasPrev?0.0:close>close[1]?volume:close<close[1]?-volume:0.0
+    float deltaUse=deltaBar
+    if useSesionRTH and (not timeframe.isintraday or deltaUse==0.0)
+        deltaUse:=deltaProxy
+
+    bool rawBosUp=not na(lastHigh) and close>lastHigh
+    bool rawBosDown=not na(lastLow) and close<lastLow
+    bool bosUp=rawBosUp and (close-lastHigh)>=atrValue*dispEff
+    bool bosDown=rawBosDown and (lastLow-close)>=atrValue*dispEff
+
+    var int trendDir=0
+    int prevTrend=trendDir
+    bool chochUp=bosUp and prevTrend==-1
+    bool chochDown=bosDown and prevTrend==1
+    if bosUp
+        trendDir:=1
+    if bosDown
+        trendDir:=-1
+
+    bool isBearCandle=close<open
+    bool isBullCandle=close>open
+
+    bool rangeOk=rangeSize>=atrMinEff*atrValue*rangeRelaxEff
+    if atrMaxEff>0.0
+        rangeOk:=rangeOk and rangeSize<=atrMaxEff*atrValue
+
+    bool volumeOk=volInst
+
+    bool bullCandidate=isBearCandle and rangeOk and volumeOk
+    bool bearCandidate=isBullCandle and rangeOk and volumeOk
+
+    var bool hasPendingBull=false
+    var float pendBullHigh=na
+    var float pendBullLow=na
+    var int pendBullBar=na
+
+    var bool hasPendingBear=false
+    var float pendBearHigh=na
+    var float pendBearLow=na
+    var int pendBearBar=na
+
+    if bullCandidate
+        hasPendingBull:=true
+        pendBullHigh:=high
+        pendBullLow:=low
+        pendBullBar:=bar_index
+
+    if bearCandidate
+        hasPendingBear:=true
+        pendBearHigh:=high
+        pendBearLow:=low
+        pendBearBar:=bar_index
+
+    bool bullCreated=false
+    bool bearCreated=false
+    float bullTop=na
+    float bullBottom=na
+    float bearTop=na
+    float bearBottom=na
+    bool bullIsReversal=false
+    bool bearIsReversal=false
+
+    if bosUp and hasPendingBull
+        bool ageOk=not na(pendBullBar) and (bar_index-pendBullBar)<=maxBarsObToBosEff
+        bool deltaOk=not useDeltaFilter or deltaUse>0.0
+        if ageOk and deltaOk
+            bullCreated:=true
+            bullTop:=pendBullHigh
+            bullBottom:=pendBullLow
+            bullIsReversal:=chochUp and pressExtremeRaw
+        hasPendingBull:=false
+
+    if bosDown and hasPendingBear
+        bool ageOk2=not na(pendBearBar) and (bar_index-pendBearBar)<=maxBarsObToBosEff
+        bool deltaOk2=not useDeltaFilter or deltaUse<0.0
+        if ageOk2 and deltaOk2
+            bearCreated:=true
+            bearTop:=pendBearHigh
+            bearBottom:=pendBearLow
+            bearIsReversal:=chochDown and pressExtremeRaw
+        hasPendingBear:=false
+
+    [bullCreated,bearCreated,bullTop,bullBottom,bearTop,bearBottom,bullIsReversal,bearIsReversal]
