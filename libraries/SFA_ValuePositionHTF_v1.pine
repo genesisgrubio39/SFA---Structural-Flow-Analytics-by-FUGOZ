@@ -1,0 +1,128 @@
+//@version=6
+library("SFA_ValuePositionHTF_v1")
+
+// OUTPUTS (15) in exact order:
+// 1  haveCycleNow     bool
+// 2  useProjection    bool
+// 3  cycleLow         float
+// 4  cycleHigh        float
+// 5  cycleMid         float
+// 6  cycleQ1          float
+// 7  cycleQ3          float
+// 8  upperTop         float
+// 9  upperBottom      float
+// 10 upperMid         float
+// 11 lowerTop         float
+// 12 lowerBottom      float
+// 13 lowerMid         float
+// 14 coreTop          float
+// 15 coreBottom       float
+
+export f_valuePositionHTF_v1(bool useProjection,float lastHighCore,float lastLowCore,int phTime,int plTime,int phBar,int plBar,float atrRef,float premiumFrac,float discountFrac,float eqFrac)=>
+    float premFrac1=na(premiumFrac) ? 0.0 : math.max(0.0,math.min(1.0,premiumFrac))
+    float discFrac1=na(discountFrac) ? 0.0 : math.max(0.0,math.min(1.0,discountFrac))
+    float eqFrac1=na(eqFrac) ? 0.0 : math.max(0.0,math.min(1.0,eqFrac))
+
+    // Sanitización mínima para estabilidad
+    float atr1=na(atrRef) ? na : math.max(0.0,atrRef)
+
+    var float cycleLow=na
+    var float cycleHigh=na
+    var float cycleMid=na
+    var float cycleQ1=na
+    var float cycleQ3=na
+    var int cycleStructBar=na
+    var int cycleStructTime=na
+
+    var float lastSwingHigh=na
+    var int lastSwingHighBar=na
+    var float lastSwingLow=na
+    var int lastSwingLowBar=na
+    var int lastSwingHighTime=na
+    var int lastSwingLowTime=na
+
+    bool isNewPH=useProjection ? (not na(phTime) and ta.change(phTime)!=0) : (not na(phBar) and ta.change(phBar)!=0)
+    bool isNewPL=useProjection ? (not na(plTime) and ta.change(plTime)!=0) : (not na(plBar) and ta.change(plBar)!=0)
+
+    // Guards: evita contaminar estado con na en swings
+    if useProjection
+        if isNewPH and not na(phTime) and not na(lastHighCore)
+            lastSwingHigh:=lastHighCore
+            lastSwingHighTime:=phTime
+        if isNewPL and not na(plTime) and not na(lastLowCore)
+            lastSwingLow:=lastLowCore
+            lastSwingLowTime:=plTime
+    else
+        if isNewPH and not na(phBar) and not na(lastHighCore)
+            lastSwingHigh:=lastHighCore
+            lastSwingHighBar:=phBar
+        if isNewPL and not na(plBar) and not na(lastLowCore)
+            lastSwingLow:=lastLowCore
+            lastSwingLowBar:=plBar
+
+    bool newCycle=false
+    float newLow=na
+    float newHigh=na
+    int structBar=na
+    int structTime=na
+
+    if useProjection
+        if isNewPH and not na(lastSwingLowTime) and not na(phTime) and lastSwingLowTime < phTime
+            newCycle:=true
+            newLow:=lastSwingLow
+            newHigh:=lastSwingHigh
+            structTime:=phTime
+        if isNewPL and not na(lastSwingHighTime) and not na(plTime) and lastSwingHighTime < plTime
+            newCycle:=true
+            newLow:=lastSwingLow
+            newHigh:=lastSwingHigh
+            structTime:=plTime
+    else
+        if isNewPH and not na(lastSwingLow) and not na(lastSwingLowBar) and not na(phBar) and lastSwingLowBar < phBar
+            newCycle:=true
+            newLow:=lastSwingLow
+            newHigh:=lastSwingHigh
+            structBar:=phBar
+        if isNewPL and not na(lastSwingHigh) and not na(lastSwingHighBar) and not na(plBar) and lastSwingHighBar < plBar
+            newCycle:=true
+            newLow:=lastSwingLow
+            newHigh:=lastSwingHigh
+            structBar:=plBar
+
+    bool haveCycle=not na(cycleHigh) and not na(cycleLow)
+    float prevRng=haveCycle ? (cycleHigh - cycleLow) : na
+    float candRng=(not na(newHigh) and not na(newLow)) ? (newHigh - newLow) : na
+
+    float govBreakAtrMult=1.0
+    float govExpandFrac=0.12
+
+    bool breaksExtreme=haveCycle and not na(atr1) and ((newHigh > cycleHigh + atr1 * govBreakAtrMult) or (newLow < cycleLow - atr1 * govBreakAtrMult))
+    bool expandsRange=haveCycle and not na(prevRng) and prevRng > 0 and not na(candRng) and (candRng >= prevRng * (1.0 + govExpandFrac))
+    bool acceptCycle=not haveCycle or breaksExtreme or expandsRange
+
+    if newCycle and newHigh > newLow and (useProjection ? not na(structTime) : not na(structBar)) and acceptCycle
+        cycleLow:=newLow
+        cycleHigh:=newHigh
+        cycleStructBar:=structBar
+        cycleStructTime:=structTime
+        float rng=cycleHigh - cycleLow
+        cycleMid:=cycleLow + rng * 0.5
+        cycleQ1:=cycleLow + rng * 0.25
+        cycleQ3:=cycleLow + rng * 0.75
+
+    bool haveCycleNow=not na(cycleHigh) and not na(cycleLow)
+    float rngNow=haveCycleNow ? (cycleHigh - cycleLow) : na
+
+    float upperTopNow=haveCycleNow ? cycleHigh : na
+    float upperBottomNow=haveCycleNow ? cycleHigh - rngNow * premFrac1 : na
+    float upperMidNow=haveCycleNow ? (upperTopNow + upperBottomNow) * 0.5 : na
+
+    float lowerBottomNow=haveCycleNow ? cycleLow : na
+    float lowerTopNow=haveCycleNow ? cycleLow + rngNow * discFrac1 : na
+    float lowerMidNow=haveCycleNow ? (lowerTopNow + lowerBottomNow) * 0.5 : na
+
+    float coreHalfRangeNow=haveCycleNow ? rngNow * eqFrac1 * 0.5 : na
+    float coreTopNow=haveCycleNow ? cycleMid + coreHalfRangeNow : na
+    float coreBottomNow=haveCycleNow ? cycleMid - coreHalfRangeNow : na
+
+    [haveCycleNow,useProjection,cycleLow,cycleHigh,cycleMid,cycleQ1,cycleQ3,upperTopNow,upperBottomNow,upperMidNow,lowerTopNow,lowerBottomNow,lowerMidNow,coreTopNow,coreBottomNow]
