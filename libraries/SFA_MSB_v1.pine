@@ -1,0 +1,115 @@
+//@version=6
+library("SFA_MSB_v1")
+
+// OUTPUTS (8) in exact order:
+// 1 bullBreak      bool
+// 2 bearBreak      bool
+// 3 breakLevel     float
+// 4 breakLeft      int
+// 5 breakRight     int
+// 6 breakBull      bool
+// 7 isReversal     bool
+// 8 regimeDirOut   int
+
+import FUGOZ/SFA_Core_v2/1 as CORE
+
+// ----------------------------
+// INTERNAL HELPERS (STATIC)
+// ----------------------------
+f_isStockLike()=>syminfo.type=="stock" or syminfo.type=="fund"
+f_isFutLike()=>syminfo.type=="futures" or syminfo.type=="index"
+
+// Safe cross helpers (guard first bar / na history)
+f_crossUp(string breakTrigger,float level)=>
+    bool hasPrev=bar_index>0 and not na(close[1]) and not na(high[1]) and not na(low[1])
+    hasPrev and (breakTrigger=="Wick" ? (high>level and high[1]<=level) : (close>level and close[1]<=level))
+
+f_crossDn(string breakTrigger,float level)=>
+    bool hasPrev=bar_index>0 and not na(close[1]) and not na(high[1]) and not na(low[1])
+    hasPrev and (breakTrigger=="Wick" ? (low<level and low[1]>=level) : (close<level and close[1]>=level))
+
+// ----------------------------
+// MAIN EXPORT
+// ----------------------------
+export f_msb_v1(
+    string breakTrigger,
+    bool useATRConfirm,
+    bool requireTrendForRVS,
+    string regimeMode,
+    bool requireImpulse,
+    string sessionFilter
+)=>
+    float _atrBreakFactor=0.6
+
+    [atr,_,_,inMainSession,sessOK,inRTH,_,_,_,_,warmupOK,_,_,_,_,_,_,okImpulse,_,_,_,_,_,_,bullTrend,bearTrend,_,_,phPrice,plPrice,isSwingHigh,isSwingLow,phBar,plBar]=CORE.f_core_v2(
+        14,true,"0700-1000","1330-1600","RTH","0930-1600",
+        false,20,1.4,1.2,false,30,2.0,50,5,0
+    )
+
+    bool allowBySession=true
+    if sessionFilter=="RTH"
+        allowBySession:=inRTH
+    else if sessionFilter=="MAIN"
+        allowBySession:=inMainSession
+    else if sessionFilter=="AUTO"
+        allowBySession:=(inRTH or not (f_isStockLike() or f_isFutLike()))
+    else
+        allowBySession:=true
+
+    bool allowByImpulse=not requireImpulse or okImpulse
+    bool allowByWarmup=warmupOK
+    bool allowFilters=allowBySession and allowByImpulse and allowByWarmup and sessOK
+
+    var float swingHigh=na
+    var int swingHighBar=na
+    var float swingLow=na
+    var int swingLowBar=na
+
+    if isSwingHigh and not na(phPrice) and not na(phBar)
+        swingHigh:=phPrice
+        swingHighBar:=phBar
+
+    if isSwingLow and not na(plPrice) and not na(plBar)
+        swingLow:=plPrice
+        swingLowBar:=plBar
+
+    var int trendDir=0
+    int regimeDir=regimeMode=="Core" ? (bullTrend ? 1 : bearTrend ? -1 : 0) : trendDir
+
+    bool bullBreak=false
+    bool bearBreak=false
+    float breakLevel=na
+    int breakLeft=na
+    int breakRight=na
+    bool breakBull=false
+    bool isReversal=false
+
+    if allowFilters and not na(swingHigh) and not na(swingHighBar)
+        bool trigUp=f_crossUp(breakTrigger,swingHigh)
+        bool atrOk=not useATRConfirm or (not na(atr) and close-swingHigh>=_atrBreakFactor*atr)
+        if trigUp and atrOk
+            bullBreak:=true
+            breakLevel:=swingHigh
+            breakLeft:=swingHighBar
+            breakRight:=bar_index
+            breakBull:=true
+            bool rvsCandidate=regimeDir==-1
+            isReversal:=requireTrendForRVS ? (regimeDir!=0 and rvsCandidate) : rvsCandidate
+            trendDir:=1
+
+    if allowFilters and not na(swingLow) and not na(swingLowBar)
+        bool trigDn=f_crossDn(breakTrigger,swingLow)
+        bool atrOk2=not useATRConfirm or (not na(atr) and swingLow-close>=_atrBreakFactor*atr)
+        if trigDn and atrOk2
+            bearBreak:=true
+            breakLevel:=swingLow
+            breakLeft:=swingLowBar
+            breakRight:=bar_index
+            breakBull:=false
+            bool rvsCandidate2=regimeDir==1
+            isReversal:=requireTrendForRVS ? (regimeDir!=0 and rvsCandidate2) : rvsCandidate2
+            trendDir:=-1
+
+    int regimeDirOut=regimeMode=="Core" ? regimeDir : trendDir
+
+    [bullBreak, bearBreak, breakLevel, breakLeft, breakRight, breakBull, isReversal, regimeDirOut]
